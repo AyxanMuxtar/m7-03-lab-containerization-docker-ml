@@ -1,4 +1,5 @@
-# Reference Dockerfile — m7-03 lab (Containerization with Docker for ML).
+# Modified Dockerfile — m7-03 lab (Containerization with Docker for ML).
+# v2: adds provenance LABELs, pins base image by digest, adds HEALTHCHECK.
 #
 # Multi-stage build that:
 #   * Stage 1 (builder)  — fetches the ONNX Runtime release, compiles the
@@ -12,16 +13,19 @@
 # assessment into the repo root. The file is gitignored by default — do
 # NOT commit it.
 #
-# Build:    docker build -t <ns>/m7-03-cat-detection:v1 .
-# Run:      docker run --rm <ns>/m7-03-cat-detection:v1
+# Build:    docker build -t <ns>/m7-03-cat-detection:v2 .
+# Run:      docker run --rm <ns>/m7-03-cat-detection:v2
 # Verify:   uid should be 1001; image size should be < ~250 MB
 
 ARG ORT_VERSION=1.20.1
 
 # ──────────────────────────────────────────────────────────────
 # Stage 1 — builder
+# 3b: Base image pinned by digest for supply-chain hygiene.
+#     Tag "debian:12-slim" can silently point to a new image on
+#     every pull; a digest is immutable.
 # ──────────────────────────────────────────────────────────────
-FROM debian:12-slim AS builder
+FROM debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS builder
 ARG ORT_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,8 +58,9 @@ RUN test -s /tmp/model.onnx \
 
 # ──────────────────────────────────────────────────────────────
 # Stage 2 — runtime
+# 3b: Same digest as stage 1 — both stages must be identical.
 # ──────────────────────────────────────────────────────────────
-FROM debian:12-slim AS runtime
+FROM debian:12-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
 ARG ORT_VERSION
 
 # Runtime-only deps: ca-certs for general hygiene; libstdc++6 because the
@@ -74,6 +79,20 @@ COPY --from=builder --chown=app:app /tmp/model.onnx /home/app/model.onnx
 
 # Tell the dynamic linker where to find libonnxruntime at runtime
 ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# 3a: Provenance LABELs — queryable via `docker image inspect`.
+#     ort.version interpolates the ARG so the label always matches
+#     the actual runtime version baked into the image.
+LABEL model.source="m6-09-assessment"
+LABEL model.framework="ultralytics-yolo26"
+LABEL ort.version="${ORT_VERSION}"
+LABEL maintainer="AyxanMuxtar"
+
+# 3c: HEALTHCHECK — re-runs the verifier on a 30s cadence so orchestrators
+#     (Compose, Swarm, Kubernetes liveness probes via exec) can detect a
+#     corrupt or missing model after the container is already running.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD check_model /home/app/model.onnx || exit 1
 
 USER app
 WORKDIR /home/app
